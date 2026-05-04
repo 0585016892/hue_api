@@ -47,7 +47,18 @@ router.post("/login", async (req, res) => {
     const { email, password } = req.body;
 
     const [rows] = await pool.query(
-      "SELECT * FROM users WHERE email = ?",
+      `
+      SELECT 
+        u.id,
+        u.full_name,
+        u.email,
+        u.password,
+        u.role_id,
+        r.role_name
+      FROM users u
+      JOIN roles r ON u.role_id = r.id
+      WHERE u.email = ?
+      `,
       [email]
     );
 
@@ -72,7 +83,7 @@ router.post("/login", async (req, res) => {
     const token = jwt.sign(
       {
         id: user.id,
-        role_id: user.role_id,
+        role: user.role_name, // 🔥 gửi luôn role_name
       },
       process.env.JWT_SECRET,
       { expiresIn: "1d" }
@@ -87,6 +98,7 @@ router.post("/login", async (req, res) => {
         full_name: user.full_name,
         email: user.email,
         role_id: user.role_id,
+        role: user.role_name, // 🔥 frontend dùng cái này
       },
     });
   } catch (err) {

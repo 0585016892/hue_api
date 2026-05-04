@@ -18,7 +18,8 @@ app.use("/api/invoices", require("./routes/invoices"));
 app.use("/api/dashboard", require("./routes/dashboard"));
 app.use("/api/doctors", require("./routes/doctors"));
 app.use("/api/user", require("./routes/user"));
-
+app.use("/api/salary", require("./routes/salary"));
+app.use("/api/medical-supplies", require("./routes/medicalSupply.routes"));
 // test server
 app.get("/", (req, res) => {
   res.json({ message: "Hospital API running 🚀" });

@@ -77,6 +77,21 @@ router.get("/", auth, async (req, res) => {
 
     let params = [];
 
+    // 🔐 PHÂN QUYỀN THEO ROLE
+    const userId = req.user.id;
+    const userRole = req.user.role;
+
+    // 👨‍⚕️ Nếu là doctor → chỉ xem lịch của mình
+    if (userRole === "doctor") {
+      baseSql += ` AND a.doctor_id = ?`;
+      params.push(userId);
+    } 
+    // 👑 Nếu admin hoặc staff → cho phép filter theo doctor_id nếu có
+    else if (doctor_id) {
+      baseSql += ` AND a.doctor_id = ?`;
+      params.push(doctor_id);
+    }
+
     // 🔍 search patient name
     if (search) {
       baseSql += ` AND p.full_name LIKE ?`;
@@ -89,13 +104,7 @@ router.get("/", auth, async (req, res) => {
       params.push(status);
     }
 
-    // 👨‍⚕️ filter doctor
-    if (doctor_id) {
-      baseSql += ` AND a.doctor_id = ?`;
-      params.push(doctor_id);
-    }
-
-    // 📊 count
+    // 📊 COUNT
     const [countRows] = await pool.query(
       `SELECT COUNT(*) as total ${baseSql}`,
       params
@@ -103,7 +112,7 @@ router.get("/", auth, async (req, res) => {
 
     const total = countRows[0].total;
 
-    // 📄 data
+    // 📄 DATA
     const [rows] = await pool.query(
       `
       SELECT 
@@ -127,8 +136,12 @@ router.get("/", auth, async (req, res) => {
         totalPages: Math.ceil(total / limit),
       },
     });
+
   } catch (err) {
-    res.status(500).json({ success: false, message: err.message });
+    res.status(500).json({
+      success: false,
+      message: err.message,
+    });
   }
 });
 router.get("/:id", auth, async (req, res) => {

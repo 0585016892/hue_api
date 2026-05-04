@@ -2,59 +2,70 @@ const router = require("express").Router();
 const pool = require("../config/db");
 const auth = require("../middleware/auth");
 router.get("/", auth, async (req, res) => {
-  console.log("📌 API DOCTOR LIST CALLED");
-  console.log("query:", req.query);
+  console.log("📌 API STAFF/DOCTOR LIST CALLED");
+  console.log("Query params received:", req.query);
 
   try {
-    let { page = 1, limit = 10, search = "" } = req.query;
+    let { 
+      page = 1, 
+      limit = 10, 
+      search = "", 
+      role_id, 
+      department 
+    } = req.query;
 
     page = Number(page);
     limit = Number(limit);
     const offset = (page - 1) * limit;
 
-    let sql = `
+    // 1. Khởi tạo câu query gốc
+    // Lưu ý: LEFT JOIN để tránh mất dữ liệu nếu user chưa có role
+    let sqlConditions = `
       FROM users u
-      JOIN roles r ON u.role_id = r.id
-      WHERE r.role_name = 'doctor'
+      LEFT JOIN roles r ON u.role_id = r.id
+      WHERE 1=1
     `;
-
     let params = [];
 
+    // 2. Lọc theo Search (Tên, Email, SĐT)
     if (search) {
-      sql += ` AND (u.full_name LIKE ? OR u.email LIKE ?)`;
-      params.push(`%${search}%`, `%${search}%`);
+      sqlConditions += ` AND (u.full_name LIKE ? OR u.email LIKE ? OR u.phone LIKE ?)`;
+      const searchKey = `%${search}%`;
+      params.push(searchKey, searchKey, searchKey);
     }
 
-    console.log("🧠 SQL BASE:", sql);
-    console.log("📦 PARAMS:", params);
+    // 3. Lọc theo Role ID (Quan trọng cho yêu cầu của bạn)
+    if (role_id && role_id !== 'null' && role_id !== 'undefined') {
+      sqlConditions += ` AND u.role_id = ?`;
+      params.push(Number(role_id));
+    } 
 
-    // COUNT
-    const countQuery = `SELECT COUNT(*) as total ${sql}`;
-    console.log("📊 COUNT QUERY:", countQuery);
+    // 4. Lọc theo Chuyên khoa
+    if (department && department !== 'null' && department !== 'undefined') {
+      sqlConditions += ` AND u.department = ?`;
+      params.push(department);
+    }
 
-    const [count] = await pool.query(countQuery, params);
+    // --- BẮT ĐẦU TRUY VẤN ---
 
-    console.log("📊 COUNT RESULT:", count);
+    // Lấy tổng số bản ghi để phân trang
+    const countQuery = `SELECT COUNT(*) as total ${sqlConditions}`;
+    const [countResult] = await pool.query(countQuery, params);
+    const total = countResult?.[0]?.total || 0;
 
-    const total = count?.[0]?.total || 0;
-
-    // DATA
+    // Lấy dữ liệu thực tế
+    // u.* lấy toàn bộ, r.role_name để hiển thị tên chức vụ ở front-end
     const dataQuery = `
-      SELECT u.*
-      ${sql}
+      SELECT u.*, r.role_name
+      ${sqlConditions}
       ORDER BY u.id DESC
       LIMIT ? OFFSET ?
     `;
 
-    console.log("📄 DATA QUERY:", dataQuery);
+    // Thêm limit và offset vào mảng params
+    const [rows] = await pool.query(dataQuery, [...params, limit, offset]);
 
-    const [rows] = await pool.query(dataQuery, [
-      ...params,
-      limit,
-      offset,
-    ]);
-
-    console.log("📦 ROWS:", rows.length);
+    console.log(`✅ Found ${rows.length} records for request`);
 
     res.json({
       success: true,
@@ -67,12 +78,83 @@ router.get("/", auth, async (req, res) => {
       },
     });
   } catch (err) {
-    console.error("❌ ERROR DOCTOR API:", err);
+    console.error("❌ ERROR STAFF LIST API:", err);
+    res.status(500).json({
+      success: false,
+      message: "Lỗi máy chủ nội bộ",
+      error: err.message
+    });
+  }
+});
+router.get("/dashboard", auth, async (req, res) => {
+  try {
+    const doctorId = req.user?.id;
+
+    if (!doctorId) {
+      return res.status(400).json({ message: "Doctor ID not found in token" });
+    }
+
+    const [[todayCount]] = await pool.query(
+      `SELECT COUNT(*) as total
+       FROM appointments
+       WHERE doctor_id = ?
+       AND DATE(appointment_date) = CURDATE()`,
+      [doctorId]
+    );
+
+    const [[patientCount]] = await pool.query(
+      `SELECT COUNT(DISTINCT patient_id) as total
+       FROM appointments
+       WHERE doctor_id = ?`,
+      [doctorId]
+    );
+
+    const [[prescriptionCount]] = await pool.query(
+      `SELECT COUNT(*) as total
+       FROM prescriptions
+       WHERE doctor_id = ?`,
+      [doctorId]
+    );
+
+    const [[revenue]] = await pool.query(
+        `SELECT IFNULL(SUM(i.total_amount),0) as total
+        FROM invoices i
+        JOIN prescriptions p ON i.prescription_id = p.id
+        WHERE p.doctor_id = ?`,
+        [doctorId]
+      );
+
+    const [todayAppointments] = await pool.query(
+      `SELECT a.*, p.full_name as patient_name
+       FROM appointments a
+       JOIN patients p ON a.patient_id = p.id
+       WHERE a.doctor_id = ?
+       AND DATE(a.appointment_date) = CURDATE()
+       ORDER BY a.appointment_date ASC`,
+      [doctorId]
+    );
+
+    res.json({
+      success: true,
+      stats: {
+        todayAppointments: todayCount?.total || 0,
+        totalPatients: patientCount?.total || 0,
+        totalPrescriptions: prescriptionCount?.total || 0,
+        totalRevenue: revenue?.total || 0,
+      },
+      todayAppointments,
+    });
+
+  } catch (err) {
+    console.error("🔥 DOCTOR DASHBOARD ERROR:");
+    console.error("Message:", err.message);
+    console.error("Stack:", err.stack);
+    console.error("Full Error:", err);
 
     res.status(500).json({
       success: false,
-      message: err.message,
-      stack: err.stack, // 👈 QUAN TRỌNG
+      message: "Internal Server Error",
+      error: err.message,
     });
   }
 });
