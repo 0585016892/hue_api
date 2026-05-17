@@ -80,51 +80,98 @@ router.get("/", auth, async (req, res) => {
     limit = parseInt(limit);
     const offset = (page - 1) * limit;
 
-    let baseSql = `
+    console.log("📥 INVOICE LIST:", { page, limit, search });
+
+    // =========================
+    // 1. COUNT
+    // =========================
+    let countSql = `
+      SELECT COUNT(*) as total
       FROM invoices i
-      JOIN prescriptions pr ON i.prescription_id = pr.id
-      JOIN appointments a ON pr.appointment_id = a.id
-      JOIN patients p ON a.patient_id = p.id
-      JOIN users u ON pr.doctor_id = u.id
+      JOIN patients p ON i.patient_id = p.id
       WHERE 1=1
     `;
 
     let params = [];
 
-    // 🔍 search patient
     if (search) {
-      baseSql += ` AND (p.full_name LIKE ? OR u.full_name LIKE ?)`;
+      countSql += ` AND (p.full_name LIKE ? OR p.phone LIKE ?)`;
       params.push(`%${search}%`, `%${search}%`);
     }
 
-    // 📊 COUNT
-    const [countRows] = await pool.query(
-      `SELECT COUNT(*) as total ${baseSql}`,
-      params
-    );
-
+    const [countRows] = await pool.query(countSql, params);
     const total = countRows[0].total;
 
-    // 📄 DATA
-    const [rows] = await pool.query(
-      `
+    // =========================
+    // 2. GET INVOICES (NO JOIN ITEMS)
+    // =========================
+    let dataSql = `
       SELECT 
-        i.*,
-        pr.id as prescription_id,
+        i.id,
+        i.patient_id,
+        i.total_amount,
+        i.status,
+        i.created_at,
         p.full_name as patient_name,
-        u.full_name as doctor_name,
-        a.symptoms,
-        a.diagnosis
-      ${baseSql}
-      ORDER BY i.id DESC
-      LIMIT ? OFFSET ?
-      `,
-      [...params, limit, offset]
-    );
+        p.phone
+      FROM invoices i
+      JOIN patients p ON i.patient_id = p.id
+      WHERE 1=1
+    `;
 
+    if (search) {
+      dataSql += ` AND (p.full_name LIKE ? OR p.phone LIKE ?)`;
+    }
+
+    dataSql += ` ORDER BY i.id DESC LIMIT ? OFFSET ?`;
+
+    const dataParams = search
+      ? [...params, limit, offset]
+      : [limit, offset];
+
+    const [invoices] = await pool.query(dataSql, dataParams);
+
+    // =========================
+    // 3. GET ITEMS (SEPARATE QUERY)
+    // =========================
+    const invoiceIds = invoices.map(i => i.id);
+
+    let items = [];
+
+    if (invoiceIds.length > 0) {
+      const [itemRows] = await pool.query(
+        `
+        SELECT 
+          id,
+          invoice_id,
+          item_type,
+          description,
+          quantity,
+          unit_price,
+          amount
+        FROM invoice_items
+        WHERE invoice_id IN (?)
+        `,
+        [invoiceIds]
+      );
+
+      items = itemRows;
+    }
+
+    // =========================
+    // 4. MAP ITEMS TO INVOICE
+    // =========================
+    const result = invoices.map(inv => ({
+      ...inv,
+      items: items.filter(i => i.invoice_id === inv.id)
+    }));
+
+    // =========================
+    // RESPONSE
+    // =========================
     res.json({
       success: true,
-      data: rows,
+      data: result,
       pagination: {
         total,
         page,
@@ -132,7 +179,10 @@ router.get("/", auth, async (req, res) => {
         totalPages: Math.ceil(total / limit),
       },
     });
+
   } catch (err) {
+    console.log("🔥 INVOICE LIST ERROR:", err);
+
     res.status(500).json({
       success: false,
       message: err.message,
@@ -141,59 +191,89 @@ router.get("/", auth, async (req, res) => {
 });
 router.get("/:id", auth, async (req, res) => {
   try {
+    const invoiceId = req.params.id;
+
+    console.log("📥 GET INVOICE DETAIL REQUEST:", {
+      invoiceId,
+    });
+
+    // =========================
+    // 1. LẤY INVOICE INFO
+    // =========================
     const [invoice] = await pool.query(
       `
       SELECT 
         i.*,
         p.full_name as patient_name,
-        p.phone,
-        u.full_name as doctor_name,
-        a.symptoms,
-        a.diagnosis,
-        pr.id as prescription_id
+        p.phone
       FROM invoices i
-      JOIN prescriptions pr ON i.prescription_id = pr.id
-      JOIN appointments a ON pr.appointment_id = a.id
-      JOIN patients p ON a.patient_id = p.id
-      JOIN users u ON pr.doctor_id = u.id
+      JOIN patients p ON i.patient_id = p.id
       WHERE i.id = ?
       `,
-      [req.params.id]
+      [invoiceId]
     );
 
+    console.log("📄 INVOICE RESULT:", invoice);
+
     if (!invoice.length) {
+      console.log("❌ INVOICE NOT FOUND:", invoiceId);
+
       return res.status(404).json({
         success: false,
         message: "Không tìm thấy hóa đơn",
       });
     }
 
+    // =========================
+    // 2. LẤY ITEMS
+    // =========================
     const [items] = await pool.query(
       `
       SELECT 
-        pi.quantity,
-        pi.price,
-        m.medicine_name,
-        m.price as unit_price
-      FROM prescription_items pi
-      JOIN medicines m ON pi.medicine_id = m.id
-      WHERE pi.prescription_id = ?
+        id,
+        item_type,
+        description,
+        quantity,
+        unit_price,
+        amount
+      FROM invoice_items
+      WHERE invoice_id = ?
       `,
-      [invoice[0].prescription_id]
+      [invoiceId]
     );
 
-    res.json({
+    console.log("🧾 ITEMS FOUND:", items.length);
+    console.log("📦 ITEMS DATA:", items);
+
+    // =========================
+    // 3. TÍNH TỔNG
+    // =========================
+    const total = items.reduce(
+      (sum, i) => sum + Number(i.amount || 0),
+      0
+    );
+
+    console.log("💰 CALCULATED TOTAL:", total);
+
+    // =========================
+    // 4. RESPONSE
+    // =========================
+    const response = {
       success: true,
       data: {
         info: invoice[0],
         items,
-        total: items.reduce(
-          (sum, i) => sum + i.price,
-          0
-        ),
+        total,
       },
-    });
+    };
+
+    console.log("📤 RESPONSE READY:", response);
+
+    res.json(response);
+
   } catch (err) {
+    console.log("🔥 INVOICE DETAIL ERROR:", err);
+
     res.status(500).json({
       success: false,
       message: err.message,
@@ -226,7 +306,7 @@ router.delete("/:id", auth, async (req, res) => {
     res.status(500).json({ success: false, message: err.message });
   }
 });
-   router.post("/convert-invoice/:id", auth, async (req, res) => {
+router.post("/convert-invoice/:id", auth, async (req, res) => {
   const conn = await pool.getConnection();
 
   try {
@@ -234,9 +314,20 @@ router.delete("/:id", auth, async (req, res) => {
 
     const { id } = req.params;
 
-    // 1. check prescription tồn tại + trạng thái
+    console.log("📥 CONVERT PRESCRIPTION:", id);
+
+    // =========================
+    // 1. LẤY PRESCRIPTION + PATIENT_ID CHUẨN
+    // =========================
     const [prescription] = await conn.query(
-      `SELECT * FROM prescriptions WHERE id = ?`,
+      `
+      SELECT 
+        p.*,
+        a.patient_id
+      FROM prescriptions p
+      JOIN appointments a ON p.appointment_id = a.id
+      WHERE p.id = ?
+      `,
       [id]
     );
 
@@ -247,23 +338,44 @@ router.delete("/:id", auth, async (req, res) => {
       });
     }
 
-    if (prescription[0].status === "approved") {
+    const pre = prescription[0];
+
+    console.log("📄 PRESCRIPTION:", pre);
+
+    // kiểm tra trạng thái
+    if (pre.status === "invoiced") {
       return res.status(400).json({
         success: false,
         message: "Đơn thuốc đã được tạo hóa đơn",
       });
     }
 
-    // 2. lấy items
+    const patientId = pre.patient_id;
+
+    if (!patientId) {
+      return res.status(400).json({
+        success: false,
+        message: "Không xác định được bệnh nhân",
+      });
+    }
+
+    // =========================
+    // 2. LẤY PRESCRIPTION ITEMS
+    // =========================
     const [items] = await conn.query(
       `
-      SELECT pi.*, m.price
+      SELECT 
+        pi.*,
+        m.price,
+        m.medicine_name
       FROM prescription_items pi
       JOIN medicines m ON pi.medicine_id = m.id
       WHERE pi.prescription_id = ?
       `,
       [id]
     );
+
+    console.log("💊 ITEMS COUNT:", items.length);
 
     if (!items.length) {
       return res.status(400).json({
@@ -272,23 +384,63 @@ router.delete("/:id", auth, async (req, res) => {
       });
     }
 
-    // 3. tính tổng tiền
+    // =========================
+    // 3. TÍNH TỔNG TIỀN
+    // =========================
     let total = 0;
 
     for (let item of items) {
       total += item.price * item.quantity;
     }
 
-    // 4. tạo invoice
+    console.log("💰 TOTAL:", total);
+
+    // =========================
+    // 4. TẠO INVOICE
+    // =========================
     const [invoice] = await conn.query(
       `
-      INSERT INTO invoices (prescription_id, total_amount, status)
-      VALUES (?, ?, 'pending')
+      INSERT INTO invoices (patient_id, total_amount, status)
+      VALUES (?, ?, 'unpaid')
       `,
-      [id, total]
+      [patientId, total]
     );
 
-    // 5. UPDATE prescription status 🔥
+    const invoiceId = invoice.insertId;
+
+    console.log("🧾 INVOICE CREATED:", invoiceId);
+
+    // =========================
+    // 5. INSERT INVOICE ITEMS
+    // =========================
+    for (let item of items) {
+      await conn.query(
+        `
+        INSERT INTO invoice_items (
+          invoice_id,
+          item_type,
+          description,
+          quantity,
+          unit_price,
+          amount
+        )
+        VALUES (?, 'medicine', ?, ?, ?, ?)
+        `,
+        [
+          invoiceId,
+          item.medicine_name || "Thuốc",
+          item.quantity,
+          item.price,
+          item.price * item.quantity,
+        ]
+      );
+    }
+
+    console.log("📦 INVOICE ITEMS INSERTED");
+
+    // =========================
+    // 6. UPDATE PRESCRIPTION STATUS
+    // =========================
     await conn.query(
       `
       UPDATE prescriptions
@@ -298,21 +450,29 @@ router.delete("/:id", auth, async (req, res) => {
       [id]
     );
 
+    // =========================
+    // 7. COMMIT
+    // =========================
     await conn.commit();
 
     res.json({
       success: true,
       message: "Tạo hóa đơn thành công",
-      invoice_id: invoice.insertId,
+      invoice_id: invoiceId,
+      patient_id: patientId,
       total,
     });
+
   } catch (err) {
     await conn.rollback();
+
+    console.log("🔥 CONVERT ERROR:", err);
 
     res.status(500).json({
       success: false,
       message: err.message,
     });
+
   } finally {
     conn.release();
   }

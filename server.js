@@ -20,6 +20,9 @@ app.use("/api/doctors", require("./routes/doctors"));
 app.use("/api/user", require("./routes/user"));
 app.use("/api/salary", require("./routes/salary"));
 app.use("/api/medical-supplies", require("./routes/medicalSupply.routes"));
+app.use("/api/chatbot", require("./routes/chatbot"));
+app.use("/api/beds", require("./routes/bedRoutes"));
+
 // test server
 app.get("/", (req, res) => {
   res.json({ message: "Hospital API running 🚀" });
